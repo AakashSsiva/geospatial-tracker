@@ -1,197 +1,157 @@
-# Copyright 2014 Google Inc. All Rights Reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#      http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+"""Pydantic-specific errors."""
 
-"""Errors for the library.
+from __future__ import annotations as _annotations
 
-All exceptions defined by the library
-should be defined in this file.
-"""
-from __future__ import absolute_import
+import re
 
-__author__ = "jcgregorio@google.com (Joe Gregorio)"
+from typing_extensions import Literal, Self
 
-import json
+from ._migration import getattr_migration
+from .version import version_short
 
-from googleapiclient import _helpers as util
+__all__ = (
+    'PydanticUserError',
+    'PydanticUndefinedAnnotation',
+    'PydanticImportError',
+    'PydanticSchemaGenerationError',
+    'PydanticInvalidForJsonSchema',
+    'PydanticErrorCodes',
+)
+
+# We use this URL to allow for future flexibility about how we host the docs, while allowing for Pydantic
+# code in the while with "old" URLs to still work.
+# 'u' refers to "user errors" - e.g. errors caused by developers using pydantic, as opposed to validation errors.
+DEV_ERROR_DOCS_URL = f'https://errors.pydantic.dev/{version_short()}/u/'
+PydanticErrorCodes = Literal[
+    'class-not-fully-defined',
+    'custom-json-schema',
+    'decorator-missing-field',
+    'discriminator-no-field',
+    'discriminator-alias-type',
+    'discriminator-needs-literal',
+    'discriminator-alias',
+    'discriminator-validator',
+    'callable-discriminator-no-tag',
+    'typed-dict-version',
+    'model-field-overridden',
+    'model-field-missing-annotation',
+    'config-both',
+    'removed-kwargs',
+    'invalid-for-json-schema',
+    'json-schema-already-used',
+    'base-model-instantiated',
+    'undefined-annotation',
+    'schema-for-unknown-type',
+    'import-error',
+    'create-model-field-definitions',
+    'create-model-config-base',
+    'validator-no-fields',
+    'validator-invalid-fields',
+    'validator-instance-method',
+    'validator-input-type',
+    'root-validator-pre-skip',
+    'model-serializer-instance-method',
+    'validator-field-config-info',
+    'validator-v1-signature',
+    'validator-signature',
+    'field-serializer-signature',
+    'model-serializer-signature',
+    'multiple-field-serializers',
+    'invalid-annotated-type',
+    'type-adapter-config-unused',
+    'root-model-extra',
+    'unevaluable-type-annotation',
+    'dataclass-init-false-extra-allow',
+    'clashing-init-and-init-var',
+    'model-config-invalid-field-name',
+    'with-config-on-model',
+    'dataclass-on-model',
+]
 
 
-class Error(Exception):
-    """Base error for this module."""
+class PydanticErrorMixin:
+    """A mixin class for common functionality shared by all Pydantic-specific errors.
 
-    pass
+    Attributes:
+        message: A message describing the error.
+        code: An optional error code from PydanticErrorCodes enum.
+    """
+
+    def __init__(self, message: str, *, code: PydanticErrorCodes | None) -> None:
+        self.message = message
+        self.code = code
+
+    def __str__(self) -> str:
+        if self.code is None:
+            return self.message
+        else:
+            return f'{self.message}\n\nFor further information visit {DEV_ERROR_DOCS_URL}{self.code}'
 
 
-class HttpError(Error):
-    """HTTP data was invalid or unexpected."""
+class PydanticUserError(PydanticErrorMixin, TypeError):
+    """An error raised due to incorrect use of Pydantic."""
 
-    @util.positional(3)
-    def __init__(self, resp, content, uri=None):
-        self.resp = resp
-        if not isinstance(content, bytes):
-            raise TypeError("HTTP content should be bytes")
-        self.content = content
-        self.uri = uri
-        self.error_details = ""
-        self.reason = self._get_reason()
 
-    @property
-    def status_code(self):
-        """Return the HTTP status code from the response content."""
-        return self.resp.status
+class PydanticUndefinedAnnotation(PydanticErrorMixin, NameError):
+    """A subclass of `NameError` raised when handling undefined annotations during `CoreSchema` generation.
 
-    def _get_reason(self):
-        """Calculate the reason for the error from the response content."""
-        reason = self.resp.reason
+    Attributes:
+        name: Name of the error.
+        message: Description of the error.
+    """
+
+    def __init__(self, name: str, message: str) -> None:
+        self.name = name
+        super().__init__(message=message, code='undefined-annotation')
+
+    @classmethod
+    def from_name_error(cls, name_error: NameError) -> Self:
+        """Convert a `NameError` to a `PydanticUndefinedAnnotation` error.
+
+        Args:
+            name_error: `NameError` to be converted.
+
+        Returns:
+            Converted `PydanticUndefinedAnnotation` error.
+        """
         try:
-            try:
-                data = json.loads(self.content.decode("utf-8"))
-            except json.JSONDecodeError:
-                # In case it is not json
-                data = self.content.decode("utf-8")
-            if isinstance(data, dict):
-                reason = data["error"]["message"]
-                error_detail_keyword = next(
-                    (
-                        kw
-                        for kw in ["detail", "details", "errors", "message"]
-                        if kw in data["error"]
-                    ),
-                    "",
-                )
-                if error_detail_keyword:
-                    self.error_details = data["error"][error_detail_keyword]
-            elif isinstance(data, list) and len(data) > 0:
-                first_error = data[0]
-                reason = first_error["error"]["message"]
-                if "details" in first_error["error"]:
-                    self.error_details = first_error["error"]["details"]
-            else:
-                self.error_details = data
-        except (ValueError, KeyError, TypeError):
-            pass
-        if reason is None:
-            reason = ""
-        return reason.strip()
-
-    def __repr__(self):
-        if self.error_details:
-            return '<HttpError %s when requesting %s returned "%s". Details: "%s">' % (
-                self.resp.status,
-                self.uri,
-                self.reason,
-                self.error_details,
-            )
-        elif self.uri:
-            return '<HttpError %s when requesting %s returned "%s">' % (
-                self.resp.status,
-                self.uri,
-                self.reason,
-            )
-        else:
-            return '<HttpError %s "%s">' % (self.resp.status, self.reason)
-
-    __str__ = __repr__
+            name = name_error.name  # type: ignore  # python > 3.10
+        except AttributeError:
+            name = re.search(r".*'(.+?)'", str(name_error)).group(1)  # type: ignore[union-attr]
+        return cls(name=name, message=str(name_error))
 
 
-class InvalidJsonError(Error):
-    """The JSON returned could not be parsed."""
+class PydanticImportError(PydanticErrorMixin, ImportError):
+    """An error raised when an import fails due to module changes between V1 and V2.
 
-    pass
+    Attributes:
+        message: Description of the error.
+    """
 
-
-class UnknownFileType(Error):
-    """File type unknown or unexpected."""
-
-    pass
-
-
-class UnknownLinkType(Error):
-    """Link type unknown or unexpected."""
-
-    pass
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code='import-error')
 
 
-class UnknownApiNameOrVersion(Error):
-    """No API with that name and version exists."""
+class PydanticSchemaGenerationError(PydanticUserError):
+    """An error raised during failures to generate a `CoreSchema` for some type.
 
-    pass
+    Attributes:
+        message: Description of the error.
+    """
 
-
-class UnacceptableMimeTypeError(Error):
-    """That is an unacceptable mimetype for this operation."""
-
-    pass
-
-
-class MediaUploadSizeError(Error):
-    """Media is larger than the method can accept."""
-
-    pass
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code='schema-for-unknown-type')
 
 
-class ResumableUploadError(HttpError):
-    """Error occurred during resumable upload."""
+class PydanticInvalidForJsonSchema(PydanticUserError):
+    """An error raised during failures to generate a JSON schema for some `CoreSchema`.
 
-    pass
+    Attributes:
+        message: Description of the error.
+    """
 
-
-class InvalidChunkSizeError(Error):
-    """The given chunksize is not valid."""
-
-    pass
-
-
-class InvalidNotificationError(Error):
-    """The channel Notification is invalid."""
-
-    pass
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code='invalid-for-json-schema')
 
 
-class BatchError(HttpError):
-    """Error occurred during batch operations."""
-
-    @util.positional(2)
-    def __init__(self, reason, resp=None, content=None):
-        self.resp = resp
-        self.content = content
-        self.reason = reason
-
-    def __repr__(self):
-        if getattr(self.resp, "status", None) is None:
-            return '<BatchError "%s">' % (self.reason)
-        else:
-            return '<BatchError %s "%s">' % (self.resp.status, self.reason)
-
-    __str__ = __repr__
-
-
-class UnexpectedMethodError(Error):
-    """Exception raised by RequestMockBuilder on unexpected calls."""
-
-    @util.positional(1)
-    def __init__(self, methodId=None):
-        """Constructor for an UnexpectedMethodError."""
-        super(UnexpectedMethodError, self).__init__(
-            "Received unexpected call %s" % methodId
-        )
-
-
-class UnexpectedBodyError(Error):
-    """Exception raised by RequestMockBuilder on unexpected bodies."""
-
-    def __init__(self, expected, provided):
-        """Constructor for an UnexpectedMethodError."""
-        super(UnexpectedBodyError, self).__init__(
-            "Expected: [%s] - Provided: [%s]" % (expected, provided)
-        )
+__getattr__ = getattr_migration(__name__)
